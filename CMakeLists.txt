@@ -13,5 +13,6 @@ set(CMAKE_CXX_STANDARD 20)
 
 
 # dependencies
+find_package(libzippp CONFIG)
 
 add_subdirectory(src)

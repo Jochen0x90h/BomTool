@@ -1,4 +1,5 @@
 #include "kicad.hpp"
+#include <libzippp.h> // https://github.com/ctabin/libzippp
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -6,53 +7,128 @@
 
 
 namespace fs = std::filesystem;
+using namespace libzippp;
 
 
 std::string clean(std::string_view s) {
-    return std::string(s.substr(1, s.size() - 2));
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+        return std::string(s.substr(1, s.size() - 2));
+    return std::string(s);
 }
 
 
+/// @brief BOM Tool: Zip gerber files and create BOM and CPL files
+///
+/// Usage:
+/// bomtool -n <name> -g <directory of gerber files> -p <path to pcb file> <output directory>
+///
+/// The path to pcb file sets defauls for name and gerber directory
+///
 int main(int argc, const char **argv) {
     if (argc < 2)
         return 1;
-    fs::path path = argv[1];
 
-    std::ifstream s(path.string());
-    if (!s) {
-        // error
-        return 1;
+    std::string name;
+    fs::path pcbPath;
+    fs::path gerberDir;
+    fs::path outDir;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        if (arg == "-n") {
+            // name
+            ++i;
+            name = argv[i];
+        } else if (arg == "-g") {
+            // gerber
+            ++i;
+            gerberDir = argv[i];
+        } else if (arg == "-p") {
+            // pcb
+            ++i;
+            pcbPath = argv[i];
+
+            // set default name and gerber dir
+            if (name.empty())
+                name = pcbPath.stem().string();
+            if (gerberDir.empty())
+                gerberDir = pcbPath.parent_path() / "gerber";
+        } else {
+            outDir = arg;
+        }
     }
-    kicad::Container file;
-    kicad::readFile(s, file);
-    s.close();
 
-    // BOM file
-    std::ofstream bom(path.parent_path() / "BOM.csv");
-    bom << "Comment,Designator,Footprint,LCSC Part #" << std::endl;
-    std::map<std::pair<std::string, std::string>, std::vector<std::string>> bomMap;
+    // zip gerber directory
+    if (!gerberDir.empty()) {
+        std::cout << "zip gerber" << std::endl;
 
-    // CPL file
-    std::ofstream cpl(path.parent_path() / "CPL.csv");
-    cpl << "Designator,Mid X,Mid Y,Layer,Rotation" << std::endl;
+        ZipArchive zip((outDir / (name + ".zip")).string());
+        zip.open(ZipArchive::Write);
 
-    for (auto element1 : file.elements) {
-        auto container1 = dynamic_cast<kicad::Container *>(element1);
-        if (container1) {
-            // check if it is a footprint
-            if (container1->id == "footprint") {
-                auto footprint = container1;
-                auto name = clean(footprint->getValue(0));
+        // delete contents
+        int count = zip.getEntriesCount();
+        for (int i = 0; i < count; ++i) {
+            auto entry = zip.getEntry(i);
+            zip.deleteEntry(entry);
+        }
 
-                // only add 0603 resistors and capacitors for now
-                if (name == "Resistor_SMD:R_0603_1608Metric" || name == "Capacitor_SMD:C_0603_1608Metric") {
-                    name = "0603";
+        // add files
+        fs::directory_iterator end;
+        for (fs::directory_iterator it(gerberDir); it != end; ++it) {
+            if (it->is_regular_file()) {
+                // read file
+                fs::path path = it->path();
 
-                    // get properties
+                zip.addFile(path.filename().string(), path.string());
+                /*std::ifstream file(path.string(), std::ios::binary | std::ios::ate);
+                size_t size = file.tellg();
+                file.seekg(0, std::ios::beg);
+                std::vector<char> buffer(size);
+                if (file.read(buffer.data(), size)) {
+                    zip.addData(path.filename().string(), buffer.data(), size);
+                }*/
+            }
+        }
+        zip.close();
+    }
+
+    if (!pcbPath.empty()) {
+
+        // read .kicad_pcb file
+        std::ifstream s(pcbPath.string());
+        if (!s) {
+            // error
+            return 1;
+        }
+        kicad::Container file;
+        kicad::readFile(s, file);
+        s.close();
+
+        // BOM file
+        std::ofstream bom(outDir / (name + "-BOM.csv"));
+        bom << "Comment,Designator,Footprint,LCSC PN" << std::endl;
+        std::map<std::pair<std::string, std::string>, std::vector<std::string>> bomMap;
+
+        // CPL file
+        std::ofstream cpl(outDir / (name + "-CPL.csv"));
+        cpl << "Designator,Mid X,Mid Y,Rotation,Layer" << std::endl;
+
+        for (auto element1 : file.elements) {
+            auto container1 = dynamic_cast<kicad::Container *>(element1);
+            if (container1) {
+                // check if it is a footprint
+                if (container1->id == "footprint") {
+                    auto footprint = clean(container1->getValue(0));
+
+                    //std::cout << "footprint " << footprint << std::endl;
+
+                    // get footprint properties
                     std::string x, y, rot;
                     std::string reference;
                     std::string value;
-                    for (auto element2 : footprint->elements) {
+                    bool populate = true;
+                    bool include = true;
+                    for (auto element2 : container1->elements) {
                         auto container2 = dynamic_cast<kicad::Container *>(element2);
                         if (container2) {
                             if (container2->id == "at") {
@@ -68,36 +144,76 @@ int main(int argc, const char **argv) {
                                 if (property->getValue(0) == "\"Value\"")
                                     value = clean(property->getValue(1));
                             }
+                            if (container2->id == "attr") {
+                                auto attr = container2;
+                                for (int i = 0; i < attr->elements.size(); ++i) {
+                                    populate &= attr->getValue(i) != "dnp";
+                                    include &= attr->getValue(i) != "exclude_from_bom";
+                                }
+                            }
                         }
                     }
 
-                    //std::cout << "footprint " << name << " reference " << reference << " value " << value << " at " << x << ' ' << y << ' ' << rot << std::endl;
+                    //bool filter = false;
+                    bool filter = true;
 
-                    bomMap[std::make_pair(value, name)].push_back(reference);
+                    // remove library from footprint name
+                    auto pos = footprint.find(':');
+                    if (pos != std::string::npos)
+                        footprint.erase(0, pos + 1);
 
-                    // write line to CPL file
-                    cpl << reference << ',' << x << "mm,-" << y << "mm," << "Top" << ',' << rot << std::endl;
+                    // only add 0603 resistors and capacitors for now
+                    //if (footprint == "Resistor_SMD:R_0603_1608Metric" || footprint == "Capacitor_SMD:C_0603_1608Metric") {
+                    //    footprint = "0603";
+                    //    filter = true;
+                    //}
+
+                    //if (populate && include) {
+                    if (filter && populate && include) {
+                        //std::cout << "add " << footprint << " reference " << reference << " value " << value << " at " << x << ' ' << y << ' ' << rot << std::endl;
+
+                        bomMap[std::make_pair(value, footprint)].push_back(reference);
+
+                        // write line to CPL file
+                        cpl << reference << ',' << x << ",-" << y << ',' << rot << "," << "top" << std::endl;
+                    } else {
+                        //std::cout << "reject " << footprint << " reference " << reference << " value " << value << std::endl;
+                    }
                 }
             }
         }
-    }
-    cpl.close();
+        cpl.close();
 
-    // write BOM
-    for (auto &p : bomMap) {
-        auto &value = p.first.first;
-        auto &name = p.first.second;
-        bom << value << ",\"";
-        bool first = true;
-        for (auto &reference : p.second) {
-            if (!first)
-                bom << ',';
-            first = false;
-            bom << reference;
+        // print BOM
+        for (auto &p : bomMap) {
+            auto &value = p.first.first;
+            auto &footprint = p.first.second;
+            int count = p.second.size();
+            std::cout << count << "x " << value << " (" << footprint << ')';
+            for (auto &reference : p.second) std::cout << " " << reference;
+
+            //std::cout << count << ", " << value << ", " << footprint;
+            //for (auto &reference : p.second) std::cout << ", " << reference;
+            std::cout << std::endl;
         }
-        bom << "\"," << name << ',' << std::endl;
+
+        // write BOM
+        for (auto &p : bomMap) {
+            auto &value = p.first.first;
+            auto &footprint = p.first.second;
+            bom << value << ",\"";
+            bool first = true;
+            std::ranges::sort(p.second);
+            for (auto &reference : p.second) {
+                if (!first)
+                    bom << ',';
+                first = false;
+                bom << reference;
+            }
+            bom << "\"," << footprint << ',' << std::endl;
+        }
+        bom.close();
     }
-    bom.close();
 
     return 0;
 }

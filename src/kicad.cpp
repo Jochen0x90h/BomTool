@@ -222,6 +222,17 @@ void Container::write(std::ostream &s, int indent) {
     s << ')';
 }
 
+bool Container::contains(const std::string &value) {
+    for (auto element : this->elements) {
+        auto v = dynamic_cast<Value *>(element);
+        if (v != nullptr) {
+            if (v->value == value)
+                return true;
+        }
+    }
+    return false;
+}
+
 Container *Container::find(const std::string &id) {
     for (auto element : this->elements) {
         auto container = dynamic_cast<Container *>(element);
@@ -232,6 +243,35 @@ Container *Container::find(const std::string &id) {
         }
     }
     return nullptr;
+}
+
+std::string Container::findValue(const std::string &id) {
+    for (auto element : this->elements) {
+        auto container = dynamic_cast<Container *>(element);
+        if (container != nullptr) {
+            if (container->id == id && container->elements.size() >= 1) {
+                auto value = dynamic_cast<kicad::Value *>(container->elements[0]);
+                if (value != nullptr)
+                    return value->value;
+            }
+        }
+    }
+    return {};
+}
+
+Container::Value2 Container::findValue2(const std::string &id) {
+    for (auto element : this->elements) {
+        auto container = dynamic_cast<Container *>(element);
+        if (container != nullptr) {
+            if (container->id == id && container->elements.size() >= 2) {
+                auto value1 = dynamic_cast<kicad::Value *>(container->elements[0]);
+                auto value2 = dynamic_cast<kicad::Value *>(container->elements[1]);
+                if (value1 != nullptr && value2 != nullptr)
+                    return {value1->value, value2->value};
+            }
+        }
+    }
+    return {};
 }
 
 void Container::erase(Element *element) {

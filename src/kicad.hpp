@@ -43,6 +43,12 @@ public:
 
 class Container : public Element {
 public:
+    struct Value2 {
+        std::string a;
+        std::string b;
+    };
+
+
     Container() = default;
     Container(std::string_view id) : id(id) {}
 
@@ -98,7 +104,7 @@ public:
     /// @brief Get a value at given index. If the element does not exist or is not of type Value, an empty string is returned
     /// @param index
     /// @return value at given index
-    std::string getValue(int index, std::string defaultValue = {}) {
+    std::string getValue(int index, const std::string &defaultValue = {}) {
         if (index >= this->elements.size())
             return defaultValue;
         auto value = dynamic_cast<Value *>(this->elements[index]);
@@ -109,7 +115,23 @@ public:
 
     void write(std::ostream &s, int indent) override;
 
+    /// @brief Check if the container contains a value
+    /// @param value to find
+    /// @return true if value is an element of the container
+    bool contains(const std::string &value);
+
+    /// @brief Find element container with given id
+    /// @param id id of sub-container to find
+    /// @return container or nullptr if not found or not of type Container
     Container *find(const std::string &id);
+
+    /// @brief Find value element with given id
+    /// @param id id of value to find
+    /// @return value or empty string if not found
+    std::string findValue(const std::string &id);
+
+    Value2 findValue2(const std::string &id);
+
     void erase(Element *element);
 
     static void newLine(std::ostream &s, int indent);
