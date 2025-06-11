@@ -302,8 +302,4 @@ void readFile(std::istream &s, Container &kicad) {
         readContainer(t, kicad);
 }
 
-void writeFile(std::ostream &s, Container &kicad) {
-    kicad.write(s, 0);
-}
-
 } // namespace kicad

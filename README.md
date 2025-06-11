@@ -1,6 +1,6 @@
 # BOM Tool
 
-Tool for generating BOM and CPL files from .kicad_pcb files
+Tool for generating BOM and CPL files from KiCad PCB (.kicad_pcb) files
 
 ## Features
 * Support for KiCad 8

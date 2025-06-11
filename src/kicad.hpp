@@ -90,14 +90,14 @@ public:
     template <typename T>
     Container *add(std::string_view id, const T &value) {
         auto container = add(id);
-        (*container).addValue(value);
+        container->addValue(value);
         return container;
     }
 
     template <typename T, typename ...Args>
     Container *add(std::string_view id, const T &value, Args ...args) {
         auto container = add(id);
-        (*container).addValue(value).addValues(args...);
+        container->addValue(value).addValues(args...);
         return container;
     }
 
@@ -125,13 +125,18 @@ public:
     /// @return container or nullptr if not found or not of type Container
     Container *find(const std::string &id);
 
-    /// @brief Find value element with given id
-    /// @param id id of value to find
+    /// @brief Find element container with given id and return its first value (of type kicad::Value)
+    /// @param id id of sub-container to find
     /// @return value or empty string if not found
     std::string findValue(const std::string &id);
 
+    /// @brief Find element container with given id and return its first and second value (of type kicad::Value)
+    /// @param id id of sub-container to find
+    /// @return values or empty strings if not found
     Value2 findValue2(const std::string &id);
 
+    /// @brief Erase element
+    /// @param element Element to erase
     void erase(Element *element);
 
     static void newLine(std::ostream &s, int indent);
@@ -147,6 +152,8 @@ void readFile(std::istream &s, Container &kicad);
 
 /// @brief Write a kicad file
 /// @param buffer buffer of an open file or network socket that is in ready state
-void writeFile(std::ostream &s, Container &kicad);
+inline void writeFile(std::ostream &s, Container &kicad) {
+    kicad.write(s, 0);
+}
 
 } // namespace kicad
