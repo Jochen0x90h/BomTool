@@ -1,5 +1,5 @@
 #include "kicad.hpp"
-#include <libzippp.h> // https://github.com/ctabin/libzippp
+#include <libzippp/libzippp.h> // https://github.com/ctabin/libzippp
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -109,45 +109,33 @@ int main(int argc, const char **argv) {
                     std::cout << "zip gerber" << std::endl;
                     auto zipPath = outDir / (job.name + ".zip");
 
-                    // remove existing zip
-                    std::error_code ec;
-                    fs::remove(zipPath, ec);
-
                     // create new zip
                     ZipArchive zip(zipPath.string());
-                    zip.open(ZipArchive::Write);
+                    if (zip.open(ZipArchive::New)) {
+                        // add files
+                        fs::directory_iterator end;
+                        for (fs::directory_iterator it(gerberDir); it != end; ++it) {
+                            if (it->is_regular_file()) {
+                                // read file
+                                fs::path path = it->path();
 
-                    // delete contents
-                    /*int count = zip.getEntriesCount();
-                    for (int i = 0; i < count; ++i) {
-                        auto entry = zip.getEntry(i);
-                        zip.deleteEntry(entry);
-                    }*/
+                                // check last write time
+                                if (fs::last_write_time(path) < pcbTime) {
+                                    std::cout << "Error: File is not up-to-date: " << path.string() << std::endl;
+                                    error = true;
+                                }
 
-                    // add files
-                    fs::directory_iterator end;
-                    for (fs::directory_iterator it(gerberDir); it != end; ++it) {
-                        if (it->is_regular_file()) {
-                            // read file
-                            fs::path path = it->path();
-
-                            // check last write time
-                            if (fs::last_write_time(path) < pcbTime) {
-                                std::cout << "Error: File is not up-to-date: " << path.string() << std::endl;
-                                error = true;
+                                if (!zip.addFile(path.filename().string(), path.string())) {
+                                    std::cout << "Error: Could add file to zip" << std::endl;
+                                    error = true;
+                                }
                             }
-
-                            zip.addFile(path.filename().string(), path.string());
-                            /*std::ifstream file(path.string(), std::ios::binary | std::ios::ate);
-                            size_t size = file.tellg();
-                            file.seekg(0, std::ios::beg);
-                            std::vector<char> buffer(size);
-                            if (file.read(buffer.data(), size)) {
-                                zip.addData(path.filename().string(), buffer.data(), size);
-                            }*/
                         }
+                        zip.close();
+                    } else {
+                        std::cout << "Error: Could not write zip file: " << zipPath.string() << std::endl;
+                        error = true;
                     }
-                    zip.close();
                 } else {
                     std::cout << "Error: Gerber directory not found: " << gerberDir.string() << std::endl;
                     error = true;
@@ -156,117 +144,125 @@ int main(int argc, const char **argv) {
         }
 
         if (job.bom) {
-            // BOM file
-            std::ofstream bom(outDir / (job.name + "-BOM.csv"));
-            bom << "Comment,Designator,Footprint,LCSC PN" << std::endl;
-            std::map<std::pair<std::string, std::string>, std::vector<std::string>> bomMap;
+            // open BOM file
+            fs::path bomPath = outDir / (job.name + "-BOM.csv");
+            std::ofstream bom(bomPath);
 
-            // CPL file
-            std::ofstream cpl(outDir / (job.name + "-CPL.csv"));
-            cpl << "Designator,Mid X,Mid Y,Rotation,Layer" << std::endl;
+            // open CPL file
+            fs::path cplPath = outDir / (job.name + "-CPL.csv");
+            std::ofstream cpl(cplPath);
 
-            for (auto element1 : file.elements) {
-                auto container1 = dynamic_cast<kicad::Container *>(element1);
-                if (container1) {
-                    // check if it is a footprint
-                    if (container1->id == "footprint") {
-                        auto footprint = container1;
+            if (bom.is_open() && cpl.is_open()) {
+                std::map<std::pair<std::string, std::string>, std::vector<std::string>> bomMap;
 
-                        // get footprint name
-                        auto footprintName = clean(footprint->getValue(0));
-                        //std::cout << "Footprint: " << footprintName << std::endl;
+                bom << "Comment,Designator,Footprint,LCSC PN" << std::endl;
+                cpl << "Designator,Mid X,Mid Y,Rotation,Layer" << std::endl;
+                for (auto element1 : file.elements) {
+                    auto container1 = dynamic_cast<kicad::Container *>(element1);
+                    if (container1) {
+                        // check if it is a footprint
+                        if (container1->id == "footprint") {
+                            auto footprint = container1;
 
-                        // get footprint properties
-                        std::string x, y, rot;
-                        std::string reference;
-                        std::string value;
-                        bool populate = true;
-                        bool include = true;
-                        for (auto element2 : container1->elements) {
-                            auto container2 = dynamic_cast<kicad::Container *>(element2);
-                            if (container2) {
-                                if (container2->id == "at") {
-                                    auto at = container2;
-                                    x = at->getValue(0);
-                                    y = at->getValue(1);
-                                    rot = at->getValue(2, "0");
-                                }
-                                if (container2->id == "property") {
-                                    auto property = container2;
-                                    if (property->getValue(0) == "\"Reference\"")
-                                        reference = clean(property->getValue(1));
-                                    if (property->getValue(0) == "\"Value\"")
-                                        value = clean(property->getValue(1));
-                                }
-                                if (container2->id == "attr") {
-                                    auto attr = container2;
-                                    for (int i = 0; i < attr->elements.size(); ++i) {
-                                        populate &= attr->getValue(i) != "dnp";
-                                        include &= attr->getValue(i) != "exclude_from_bom";
+                            // get footprint name
+                            auto footprintName = clean(footprint->getValue(0));
+                            //std::cout << "Footprint: " << footprintName << std::endl;
+
+                            // get footprint properties
+                            std::string x, y, rot;
+                            std::string reference;
+                            std::string value;
+                            bool populate = true;
+                            bool include = true;
+                            for (auto element2 : container1->elements) {
+                                auto container2 = dynamic_cast<kicad::Container *>(element2);
+                                if (container2) {
+                                    if (container2->id == "at") {
+                                        auto at = container2;
+                                        x = at->getValue(0);
+                                        y = at->getValue(1);
+                                        rot = at->getValue(2, "0");
+                                    }
+                                    if (container2->id == "property") {
+                                        auto property = container2;
+                                        if (property->getValue(0) == "\"Reference\"")
+                                            reference = clean(property->getValue(1));
+                                        if (property->getValue(0) == "\"Value\"")
+                                            value = clean(property->getValue(1));
+                                    }
+                                    if (container2->id == "attr") {
+                                        auto attr = container2;
+                                        for (int i = 0; i < attr->elements.size(); ++i) {
+                                            populate &= attr->getValue(i) != "dnp";
+                                            include &= attr->getValue(i) != "exclude_from_bom";
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        //bool filter = false;
-                        bool filter = true;
+                            //bool filter = false;
+                            bool filter = true;
 
-                        // remove library from footprint name
-                        auto pos = footprintName.find(':');
-                        if (pos != std::string::npos)
-                            footprintName.erase(0, pos + 1);
+                            // remove library from footprint name
+                            auto pos = footprintName.find(':');
+                            if (pos != std::string::npos)
+                                footprintName.erase(0, pos + 1);
 
-                        // only add 0603 resistors and capacitors for now
-                        //if (footprint == "Resistor_SMD:R_0603_1608Metric" || footprint == "Capacitor_SMD:C_0603_1608Metric") {
-                        //    footprint = "0603";
-                        //    filter = true;
-                        //}
+                            // only add 0603 resistors and capacitors for now
+                            //if (footprint == "Resistor_SMD:R_0603_1608Metric" || footprint == "Capacitor_SMD:C_0603_1608Metric") {
+                            //    footprint = "0603";
+                            //    filter = true;
+                            //}
 
-                        //if (populate && include) {
-                        if (filter && populate && include) {
-                            //std::cout << "add " << footprint << " reference " << reference << " value " << value << " at " << x << ' ' << y << ' ' << rot << std::endl;
+                            //if (populate && include) {
+                            if (filter && populate && include) {
+                                //std::cout << "add " << footprint << " reference " << reference << " value " << value << " at " << x << ' ' << y << ' ' << rot << std::endl;
 
-                            bomMap[std::make_pair(value, footprintName)].push_back(reference);
+                                bomMap[std::make_pair(value, footprintName)].push_back(reference);
 
-                            // write line to CPL file
-                            cpl << reference << ',' << x << ",-" << y << ',' << rot << "," << "top" << std::endl;
-                        } else {
-                            //std::cout << "reject " << footprint << " reference " << reference << " value " << value << std::endl;
+                                // write line to CPL file
+                                cpl << reference << ',' << x << ",-" << y << ',' << rot << "," << "top" << std::endl;
+                            } else {
+                                //std::cout << "reject " << footprint << " reference " << reference << " value " << value << std::endl;
+                            }
                         }
                     }
                 }
-            }
-            cpl.close();
+                cpl.close();
 
-            // print BOM
-            for (auto &p : bomMap) {
-                auto &value = p.first.first;
-                auto &footprintName = p.first.second;
-                int count = p.second.size();
-                std::cout << count << "x " << value << " (" << footprintName << ')';
-                for (auto &reference : p.second) std::cout << " " << reference;
+                // print BOM
+                for (auto &p : bomMap) {
+                    auto &value = p.first.first;
+                    auto &footprintName = p.first.second;
+                    int count = p.second.size();
+                    std::cout << count << "x " << value << " (" << footprintName << ')';
+                    for (auto &reference : p.second) std::cout << " " << reference;
 
-                //std::cout << count << ", " << value << ", " << footprintName;
-                //for (auto &reference : p.second) std::cout << ", " << reference;
-                std::cout << std::endl;
-            }
-
-            // write BOM
-            for (auto &p : bomMap) {
-                auto &value = p.first.first;
-                auto &footprintName = p.first.second;
-                bom << value << ",\"";
-                bool first = true;
-                std::ranges::sort(p.second);
-                for (auto &reference : p.second) {
-                    if (!first)
-                        bom << ',';
-                    first = false;
-                    bom << reference;
+                    //std::cout << count << ", " << value << ", " << footprintName;
+                    //for (auto &reference : p.second) std::cout << ", " << reference;
+                    std::cout << std::endl;
                 }
-                bom << "\"," << footprintName << ',' << std::endl;
+
+                // write BOM
+                for (auto &p : bomMap) {
+                    auto &value = p.first.first;
+                    auto &footprintName = p.first.second;
+                    bom << value << ",\"";
+                    bool first = true;
+                    std::ranges::sort(p.second);
+                    for (auto &reference : p.second) {
+                        if (!first)
+                            bom << ',';
+                        first = false;
+                        bom << reference;
+                    }
+                    bom << "\"," << footprintName << ',' << std::endl;
+                }
+                bom.close();
+            } else {
+                std::cout << "Error: Could not create BOM/CPL file in " << outDir.string() << std::endl;
+                error = true;
             }
-            bom.close();
         }
     }
 

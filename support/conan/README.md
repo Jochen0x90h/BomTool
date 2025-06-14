@@ -38,10 +38,10 @@ python configure.py
 It generates CMakeUserPresets.json which can be used by IDEs such as VSCode
 
 
-## Install to Conan Cache
+## Install executable to ~/.local/bin
 
-To install to the local conan cache, run
+To install to ~/.local/bin, run
 
 ```
-python create.py
+python install.py
 ```
