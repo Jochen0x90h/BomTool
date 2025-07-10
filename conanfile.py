@@ -13,7 +13,7 @@ class Project(ConanFile):
     generators = "CMakeDeps", "CMakeToolchain"
     exports_sources = "conanfile.py", "CMakeLists.txt", "src/*"
     requires = [
-        "libzippp/7.1-1.10.1"
+        "libzippp/7.1-1.10.1",
     ]
 
     keep_imports = True

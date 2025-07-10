@@ -1,14 +1,15 @@
-## Conan profiles
+# Conan
 
-Run
+If you use conan for the first time, run
 
+```console
+$ conan profile detect
 ```
-conan profile detect
-```
 
-to create a default profile if necessary.
+It creates a default profile in ~/.conan2/profiles
 
-Windows: It should contain these lines:
+## Windows
+The default profile should contain these lines:
 
 ```
 compiler=msvc
@@ -18,30 +19,22 @@ compiler.cppstd=20
 If not, Install Visual Studio Community Edition (in addition to VSCode!)
 with C++ for desktop option and/or change cppstd to 20.
 
+## Debug Profile
+
 Create debug profile by copying the default profile and set
 
 ```
 build_type=Debug
 ```
 
-## Presets
+# Presets
 
-Copy presets.txt from the subdirectory for your platform into the root of the project and modify it to contain all
-desired platforms (native / microcontrollers).
+Copy cpresets.txt from the subdirectory for your platform into the root of the project.
 
 Then run
 
-```
-python configure.py
+```console
+$ python cinstall.py
 ```
 
 It generates CMakeUserPresets.json which can be used by IDEs such as VSCode
-
-
-## Install executable to ~/.local/bin
-
-To install to ~/.local/bin, run
-
-```
-python install.py
-```

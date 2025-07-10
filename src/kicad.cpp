@@ -188,15 +188,170 @@ int Container::count() {
     return c;
 }
 
-Container &Container::addValue(std::string_view value) {
-    this->elements.push_back(new Value(value));
-    return *this;
-}
 
 Container *Container::add(std::string_view id) {
     auto container = new Container(id);
     this->elements.push_back(container);
     return container;
+}
+
+Container &Container::addValue(std::string_view value) {
+    this->elements.push_back(new Value(value));
+    return *this;
+}
+
+Container &Container::setTag(int index, std::string_view value) {
+    if (index >= this->elements.size())
+        this->elements.resize(index + 1);
+    this->elements[index] = new Value(value);
+    return *this;
+}
+
+Container &Container::setString(int index, std::string_view value) {
+    if (index >= this->elements.size())
+        this->elements.resize(index + 1);
+    auto v = new Value();
+    v->value += '"';
+    v->value += value;
+    v->value += '"';
+    this->elements[index] = v;
+    return *this;
+}
+
+Container &Container::setInt(int index, int value) {
+    if (index >= this->elements.size())
+        this->elements.resize(index + 1);
+    this->elements[index] = new Value(std::to_string(value));
+    return *this;
+}
+
+Container &Container::setFloat(int index, double value) {
+    if (index >= this->elements.size())
+        this->elements.resize(index + 1);
+    this->elements[index] = new Value(std::to_string(value));
+    return *this;
+}
+
+std::string Container::getTag(int index, std::string_view defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return std::string(defaultValue);
+
+    return value->value;
+}
+
+std::string Container::getString(int index, std::string_view defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return std::string(defaultValue);
+
+    // remove quotes
+    int size = value->value.size();
+    if (size >= 2 && value->value.front() == '"' && value->value.back() == '"')
+        return std::string(value->value.substr(1, size - 2));
+
+    return value->value;
+}
+
+int Container::getInt(int index, int defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return defaultValue;
+
+    // cast to int
+    try {
+        return std::stoi(value->value);
+    } catch (std::exception &) {
+        return defaultValue;
+    }
+}
+
+double Container::getFloat(int index, double defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return defaultValue;
+
+    // cast to double
+    try {
+        return std::stod(value->value);
+    } catch (std::exception &) {
+        return defaultValue;
+    }
+}
+
+
+bool Container::contains(std::string_view tag) {
+    for (auto element : this->elements) {
+        auto v = dynamic_cast<Value *>(element);
+        if (v != nullptr) {
+            if (v->value == tag)
+                return true;
+        }
+    }
+    return false;
+}
+
+Container *Container::find(std::string_view id) {
+    for (auto element : this->elements) {
+        auto container = dynamic_cast<Container *>(element);
+        if (container != nullptr) {
+            if (container->id == id) {
+                return container;
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::string Container::findString(std::string_view id) {
+    auto container = find(id);
+    if (container != nullptr)
+        return container->getString(0);
+    return {};
+}
+
+double Container::findFloat(std::string_view id) {
+    auto container = find(id);
+    if (container != nullptr)
+        return container->getFloat(0);
+    return {};
+}
+
+Container::Value2<std::string> Container::findString2(std::string_view id) {
+    auto container = find(id);
+    if (container != nullptr)
+        return {container->getString(0), container->getString(1)};
+    return {};
+}
+
+Container::Value2<double> Container::findFloat2(std::string_view id) {
+    auto container = find(id);
+    if (container != nullptr)
+        return {container->getFloat(0), container->getFloat(1)};
+    return {};
+}
+
+void Container::erase(Element *element) {
+    for (auto it = this->elements.begin(); it != this->elements.end(); ++it) {
+        if (*it == element) {
+            this->elements.erase(it);
+            delete element;
+            return;
+        }
+    }
+}
+
+void Container::erase(std::string_view id) {
+    auto it = this->elements.begin();
+    while (it != this->elements.end()) {
+        auto container = dynamic_cast<kicad::Container *>(*it);
+        if (container->id == id) {
+            it = this->elements.erase(it);
+            delete container;
+        } else {
+            ++it;
+        }
+    }
 }
 
 void Container::write(std::ostream &s, int indent) {
@@ -220,68 +375,6 @@ void Container::write(std::ostream &s, int indent) {
         newLine(s, indent);
     }
     s << ')';
-}
-
-bool Container::contains(const std::string &value) {
-    for (auto element : this->elements) {
-        auto v = dynamic_cast<Value *>(element);
-        if (v != nullptr) {
-            if (v->value == value)
-                return true;
-        }
-    }
-    return false;
-}
-
-Container *Container::find(const std::string &id) {
-    for (auto element : this->elements) {
-        auto container = dynamic_cast<Container *>(element);
-        if (container != nullptr) {
-            if (container->id == id) {
-                return container;
-            }
-        }
-    }
-    return nullptr;
-}
-
-std::string Container::findValue(const std::string &id) {
-    for (auto element : this->elements) {
-        auto container = dynamic_cast<Container *>(element);
-        if (container != nullptr) {
-            if (container->id == id && container->elements.size() >= 1) {
-                auto value = dynamic_cast<kicad::Value *>(container->elements[0]);
-                if (value != nullptr)
-                    return value->value;
-            }
-        }
-    }
-    return {};
-}
-
-Container::Value2 Container::findValue2(const std::string &id) {
-    for (auto element : this->elements) {
-        auto container = dynamic_cast<Container *>(element);
-        if (container != nullptr) {
-            if (container->id == id && container->elements.size() >= 2) {
-                auto value1 = dynamic_cast<kicad::Value *>(container->elements[0]);
-                auto value2 = dynamic_cast<kicad::Value *>(container->elements[1]);
-                if (value1 != nullptr && value2 != nullptr)
-                    return {value1->value, value2->value};
-            }
-        }
-    }
-    return {};
-}
-
-void Container::erase(Element *element) {
-    for (auto it = this->elements.begin(); it != this->elements.end(); ++it) {
-        if (*it == element) {
-            this->elements.erase(it);
-            delete element;
-            return;
-        }
-    }
 }
 
 void Container::newLine(std::ostream &s, int indent) {
