@@ -8,13 +8,14 @@ Tool for generating BOM and CPL files from KiCad PCB (.kicad_pcb) files
 
 ## Usage
 
-$ bomtool [-n \<name>] \<option> \<path to .kicad_pcb file> \<output directory>
+$ bomtool [-n \<name>] \<options> \<path to .kicad_pcb file> \<output directory>
 
 Option | Description
 -------|-------------
 -n     | Output name, optional parameter
 -g     | Zip gerber files (path to gerber is read from the .kicad_pcb file)
--b     | Generate BOM and CPL files for JLCPCB in addition to gerber
+-b     | Generate generic BOM in CSV format
+-j     | Generate BOM and CPL files for JLCPCB
 
 Multiple .kicad_pcb files can be processed at once. This example zips the gerber for both onlyPcb.kicad_pcb and pcbAndBom.kicad_pcb and generats BOM files for pcbAndBom.kicad_pcb:
 

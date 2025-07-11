@@ -11,35 +11,68 @@ using namespace libzippp;
 
 
 // remove quotes from string
-std::string clean(std::string_view s) {
+/*std::string clean(std::string_view s) {
     if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
         return std::string(s.substr(1, s.size() - 2));
     return std::string(s);
+}*/
+
+std::string getType(std::string_view reference) {
+    // extract type, e.g. "R" from "R1"
+    size_t i = 0;
+    while (i < reference.length()) {
+        char ch = reference[i];
+        if (ch >= '0' && ch <= '9')
+            break;
+        ++i;
+    }
+    return std::string(reference.substr(0, i));
 }
 
 struct Job {
     std::string name;
-    bool gerber = true;
-    bool bom = false;
+    bool gerber;
+    bool bom;
+    bool jlcpcb;
     fs::path pcbPath;
 };
 
 struct BomKey {
+    std::string type;
+    std::string value;
+    int voltage; // in mV
+    std::string footprint;
+    std::string manufacturer;
+    std::string mfrPn;
+
+    auto operator <=>(const BomKey& other) const noexcept = default;
+};
+
+struct BomValue {
+    std::vector<std::string> references; // list of references (e.g. R1, R2, C1...)
+    int padCount;
+    bool throughHole;
+    std::string description;
+};
+
+struct JlcBomKey {
+    std::string type;
     std::string value;
     std::string footprintName;
     std::string lcscPn;
 
-    auto operator <=>(const BomKey& other) const noexcept = default;
+    auto operator <=>(const JlcBomKey& other) const noexcept = default;
 };
 
 
 /// @brief BOM Tool: Zip gerber files and create BOM and CPL files
 ///
 /// Usage:
-/// bomtool -n <name> <option> <path to .kicad_pcb file> <output directory>
+/// bomtool -n <name> <options> <path to .kicad_pcb file> <output directory>
 /// Options:
-///   -g Only gerber (gerber directory is determined from pcb file)
-///   -b BOM and gerber
+///   -g Zip gerber files (path to gerber is read from the .kicad_pcb file)
+///   -b Generate generic BOM in CSV format
+///   -j Generate BOM and CPL files for JLCPCB
 ///
 /// Multiple pcb files can be processed in one go
 int main(int argc, const char **argv) {
@@ -49,47 +82,51 @@ int main(int argc, const char **argv) {
     std::list<Job> jobs;
 
     // create first job
-    Job *job = &jobs.emplace_back();
+    //Job *job = &jobs.emplace_back();
 
     fs::path outDir;
 
+    std::string name;
+    bool gerber = false;
+    bool bom = false;
+    bool jlcpcb = false;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "-n") {
             // set name of current job
             ++i;
-            job->name = argv[i];
+            name = argv[i];
         } else if (arg == "-g") {
-            // only gerber
-            ++i;
-            job->pcbPath = argv[i];
-
-            // add next job
-            job = &jobs.emplace_back();
+            // zip gerber
+            gerber = true;
         } else if (arg == "-b") {
-            // pcb and bom
-            ++i;
-            job->bom = true;
-            job->pcbPath = argv[i];
-
-            // add next job
-            job = &jobs.emplace_back();
+            // create bom
+            bom = true;
+        } else if (arg == "-j") {
+            // bom and placement file for JLCPCB
+            jlcpcb = true;
         } else {
-            outDir = arg;
+            if (gerber || bom || jlcpcb) {
+                // add job
+                fs::path pcbPath = arg;
+                if (name.empty())
+                    name = pcbPath.stem().string();
+
+                jobs.emplace_back(name, gerber, bom, jlcpcb, pcbPath);
+
+                // clear
+                name.clear();
+                gerber = false;
+                bom = false;
+                jlcpcb = false;
+            } else {
+                outDir = arg;
+            }
         }
     }
 
-    // remove last job which is empty
-    auto last = jobs.end();
-    --last;
-    jobs.erase(last);
-
     bool error = false;
     for (auto &job : jobs) {
-        // set default name if it is empty
-        if (job.name.empty())
-            job.name = job.pcbPath.stem().string();
-
         std::cout << "*** " << job.name << " ***" << std::endl;
 
         // read pcb (.kicad_pcb) file
@@ -111,7 +148,7 @@ int main(int argc, const char **argv) {
             auto setup = file.find("setup");
             if (setup != nullptr) {
                 auto plotParams = setup->find("pcbplotparams");
-                auto gerberDir = fs::weakly_canonical(job.pcbPath.parent_path() / clean(plotParams->findString("outputdirectory")));
+                auto gerberDir = fs::weakly_canonical(job.pcbPath.parent_path() / plotParams->findString("outputdirectory"));
 
                 if (fs::is_directory(gerberDir)) {
                     std::cout << "zip gerber" << std::endl;
@@ -153,6 +190,129 @@ int main(int argc, const char **argv) {
 
         if (job.bom) {
             // open BOM file
+            fs::path bomPath = outDir / (job.name + ".csv");
+            std::ofstream bom(bomPath);
+            if (bom.is_open()) {
+                std::map<BomKey, BomValue> bomMap;
+
+                //bom << "Count,Type,Value,Voltage,Footprint,SMD Pads,THT Pads,Manufacturer,Mfr. PN,Description" << std::endl;
+                bom << "Count,Reference,Value,Voltage,Footprint,SMD Pads,THT Pads,Manufacturer,Mfr. PN,Description" << std::endl;
+
+                for (auto element1 : file.elements) {
+                    auto container1 = dynamic_cast<kicad::Container *>(element1);
+                    if (container1) {
+                        // check if it is a footprint
+                        if (container1->id == "footprint") {
+                            auto footprint = container1;
+
+                            // get footprint name
+                            auto footprintName = footprint->getString(0);
+
+                            // remove library from footprint name
+                            auto pos = footprintName.find(':');
+                            if (pos != std::string::npos)
+                                footprintName.erase(0, pos + 1);
+
+                            // get footprint properties
+                            //std::string type; // e.g. "R" or "C"
+                            std::string reference; // e.g. "R1"
+                            std::string value; // e.g. 100k
+                            int voltage = 0;
+                            int padCount = 0;
+                            std::string manufacturer;
+                            std::string mfrPn;
+                            std::string description;
+                            bool doNotPopulate = false;
+                            bool excludeFromBom = false;
+                            bool throughHole = false;
+                            for (auto element2 : container1->elements) {
+                                auto property = dynamic_cast<kicad::Container *>(element2);
+                                if (property) {
+                                    if (property->id == "property") {
+                                        auto propertyName = property->getString(0);
+                                        auto propertyValue = property->getString(1);
+                                        if (propertyName == "Reference") {
+                                            // reference, e.g. "R1"
+                                            reference = propertyValue;
+                                        } else if (propertyName == "Value") {
+                                            // value, e.g. "100k"
+                                            value = propertyValue;
+                                        } else if (propertyName == "Voltage") {
+                                            // operating voltage
+                                            voltage = lround(std::stod(propertyValue) * 1000.0);
+                                        } else if (propertyName == "Manufacturer") {
+                                            manufacturer = propertyValue;
+                                        } else if (propertyName == "Mfr. PN") {
+                                            mfrPn = propertyValue;
+                                        } else if (propertyName == "Description") {
+                                            description = propertyValue;
+                                        }
+                                    }
+                                    if (property->id == "attr") {
+                                        doNotPopulate = property->contains("dnp");
+                                        excludeFromBom = property->contains("exclude_from_bom");
+                                        throughHole = property->contains("through_hole");
+                                    }
+                                    if (property->id == "pad") {
+                                        ++padCount;
+                                    }
+                                }
+                            }
+
+                            if (!excludeFromBom) {
+                                auto &v = bomMap[{getType(reference), value, voltage, footprintName, manufacturer, mfrPn}];
+                                v.references.push_back(reference);
+                                v.padCount = std::max(v.padCount, padCount);
+                                v.throughHole = throughHole;
+                                v.description = description;
+                            }
+                        }
+                    }
+                }
+
+                // write BOM
+                for (auto &p : bomMap) {
+                    // count
+                    bom << p.second.references.size() << ",";
+
+                    // type
+                    //bom << p.first.type << ",";
+
+                    // references
+                    bom << '"';
+                    for (auto &reference : p.second.references) {
+                        if (reference != p.second.references.front())
+                            bom << ',';
+                        bom << reference;
+                    }
+                    bom << "\",";
+
+                    // value, voltage, footprint
+                    bom << "\"" << p.first.value << "\","
+                        << (p.first.voltage * 0.001) << ","
+                        << p.first.footprint << ",";
+
+                    // pad count
+                    if (p.second.throughHole)
+                        bom << ',';
+                    bom << p.second.padCount << ",";
+                    if (!p.second.throughHole)
+                        bom << ',';
+
+                    // manufactuer, part number, description
+                    bom << "\"" << p.first.manufacturer << "\","
+                        << p.first.mfrPn << ","
+                        "\"" << p.second.description << "\"" << std::endl;
+                }
+                bom.close();
+            } else {
+                std::cout << "Error: Could not create BOM file in " << outDir.string() << std::endl;
+                error = true;
+            }
+        }
+
+        if (job.jlcpcb) {
+            // open BOM file
             fs::path bomPath = outDir / (job.name + "-BOM.csv");
             std::ofstream bom(bomPath);
 
@@ -162,7 +322,7 @@ int main(int argc, const char **argv) {
 
             if (bom.is_open() && cpl.is_open()) {
                 // map from part protperties (e.g. footprint) to list of references (e.g. R1, R2, R3...)
-                std::map<BomKey, std::vector<std::string>> bomMap;
+                std::map<JlcBomKey, std::vector<std::string>> bomMap;
 
                 // set of used references to detect duplicates
                 std::set<std::string> usedReferences;
@@ -180,13 +340,18 @@ int main(int argc, const char **argv) {
                             auto footprintName = footprint->getString(0);
                             //std::cout << "Footprint: " << footprintName << std::endl;
 
+                            // remove library from footprint name
+                            auto pos = footprintName.find(':');
+                            if (pos != std::string::npos)
+                                footprintName.erase(0, pos + 1);
+
                             // get footprint properties
                             std::string x, y, rot;
                             std::string reference;
                             std::string value;
                             std::string lcscPn;
-                            bool populate = true;
-                            bool include = true;
+                            bool doNotPopulate = false;
+                            bool excludeFromBom = false;
                             for (auto element2 : container1->elements) {
                                 auto property = dynamic_cast<kicad::Container *>(element2);
                                 if (property) {
@@ -214,25 +379,16 @@ int main(int argc, const char **argv) {
                                         }
                                     }
                                     if (property->id == "attr") {
-                                        populate &= !property->contains("dnp"); // do not populate
-                                        include &= !property->contains("exclude_from_bom");
-                                        //for (int i = 0; i < attr->elements.size(); ++i) {
-                                        //    populate &= attr->getTag(i) != "dnp";
-                                        //    include &= attr->getTag(i) != "exclude_from_bom";
-                                        //}
+                                        doNotPopulate = property->contains("dnp");
+                                        excludeFromBom = property->contains("exclude_from_bom");
                                     }
                                 }
                             }
 
-                            // remove library from footprint name
-                            auto pos = footprintName.find(':');
-                            if (pos != std::string::npos)
-                                footprintName.erase(0, pos + 1);
-
-                            if (populate && include) {
+                            if (!doNotPopulate && !excludeFromBom) {
                                 //std::cout << "add " << footprint << " reference " << reference << " value " << value << " at " << x << ' ' << y << ' ' << rot << std::endl;
 
-                                bomMap[{value, footprintName, lcscPn}].push_back(reference);
+                                bomMap[{getType(reference), value, footprintName, lcscPn}].push_back(reference);
 
                                 // write line to CPL file
                                 cpl << reference << ',' << x << ",-" << y << ',' << rot << "," << "top" << std::endl;
