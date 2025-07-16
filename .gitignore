@@ -1,8 +1,8 @@
-vcpkg/
-build/
-__pycache__/
-cpresets.txt
-vpresets.txt
+/vcpkg/
+/build/
+/__pycache__/
+/cpresets.txt
+/vpresets.txt
 CMakeUserPresets.json
 
 # VSCode
@@ -14,7 +14,3 @@ cmake-build*/
 
 # QtCreator
 CMakeLists.txt.user
-
-# footprint files
-footprints.json
-*.kicad_mod

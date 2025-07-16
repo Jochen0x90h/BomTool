@@ -133,6 +133,7 @@ int main(int argc, const char **argv) {
         std::ifstream s(job.pcbPath.string());
         if (!s) {
             // error
+            std::cout << "Error: Can't read file " << job.pcbPath.string() << std::endl;
             return 1;
         }
         kicad::Container file;
@@ -151,7 +152,7 @@ int main(int argc, const char **argv) {
                 auto gerberDir = fs::weakly_canonical(job.pcbPath.parent_path() / plotParams->findString("outputdirectory"));
 
                 if (fs::is_directory(gerberDir)) {
-                    std::cout << "zip gerber" << std::endl;
+                    std::cout << "Zip gerber" << std::endl;
                     auto zipPath = outDir / (job.name + ".zip");
 
                     // create new zip
@@ -218,7 +219,8 @@ int main(int argc, const char **argv) {
                             std::string reference; // e.g. "R1"
                             std::string value; // e.g. 100k
                             int voltage = 0;
-                            int padCount = 0;
+                            //int padCount = 0;
+                            std::set<std::string> padNames; // to detect duplicates
                             std::string manufacturer;
                             std::string mfrPn;
                             std::string description;
@@ -254,7 +256,9 @@ int main(int argc, const char **argv) {
                                         throughHole = property->contains("through_hole");
                                     }
                                     if (property->id == "pad") {
-                                        ++padCount;
+                                        auto padName = property->getString(0);
+                                        padNames.insert(padName);
+                                        //++padCount;
                                     }
                                 }
                             }
@@ -262,6 +266,7 @@ int main(int argc, const char **argv) {
                             if (!excludeFromBom) {
                                 auto &v = bomMap[{getType(reference), value, voltage, footprintName, manufacturer, mfrPn}];
                                 v.references.push_back(reference);
+                                int padCount = padNames.size();
                                 v.padCount = std::max(v.padCount, padCount);
                                 v.throughHole = throughHole;
                                 v.description = description;
@@ -401,14 +406,15 @@ int main(int argc, const char **argv) {
                 cpl.close();
 
                 // print BOM to std::cout
-                for (auto &p : bomMap) {
+                /*for (auto &p : bomMap) {
                     int count = p.second.size();
                     std::cout << count << "x " << p.first.value << " (" << p.first.footprintName << ')';
                     for (auto &reference : p.second) std::cout << " " << reference;
                     std::cout << std::endl;
-                }
+                }*/
 
                 // write BOM
+                std::cout << "Write BOM" << std::endl;
                 for (auto &p : bomMap) {
                     // comment (use value)
                     bom << p.first.value;
