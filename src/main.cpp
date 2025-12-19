@@ -10,15 +10,8 @@ namespace fs = std::filesystem;
 using namespace libzippp;
 
 
-// remove quotes from string
-/*std::string clean(std::string_view s) {
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
-        return std::string(s.substr(1, s.size() - 2));
-    return std::string(s);
-}*/
-
+// extract type of a component, e.g. "R" from "R1"
 std::string getType(std::string_view reference) {
-    // extract type, e.g. "R" from "R1"
     size_t i = 0;
     while (i < reference.length()) {
         char ch = reference[i];
@@ -29,11 +22,17 @@ std::string getType(std::string_view reference) {
     return std::string(reference.substr(0, i));
 }
 
+// manufacturer
+enum class Manufacturer {
+    GENERIC,
+    JLCPCB
+};
+
 struct Job {
     std::string name;
     bool gerber;
     bool bom;
-    bool jlcpcb;
+    Manufacturer manufacturer;
     fs::path pcbPath;
 };
 
@@ -43,7 +42,7 @@ struct BomKey {
     int voltage; // in mV
     std::string footprint;
     std::string manufacturer;
-    std::string mfrPn;
+    std::string mpn;
 
     auto operator <=>(const BomKey& other) const noexcept = default;
 };
@@ -68,11 +67,12 @@ struct JlcBomKey {
 /// @brief BOM Tool: Zip gerber files and create BOM and CPL files
 ///
 /// Usage:
-/// bomtool -n <name> <options> <path to .kicad_pcb file> <output directory>
+/// bom-tool <options> <path to .kicad_pcb file> <output directory>
 /// Options:
-///   -g Zip gerber files (path to gerber is read from the .kicad_pcb file)
-///   -b Generate generic BOM in CSV format
-///   -j Generate BOM and CPL files for JLCPCB
+///   -n Name for output files (optional, derived from .kicad_pcb file name if not given)
+///   -g Export and zip gerber files (path to gerber and layers are read from the .kicad_pcb file)
+///   -b Generate BOM and placement file
+///   -j Generate for JLCPCB (oval holes alternate, BOM with LCSC PN, CPL)
 ///
 /// Multiple pcb files can be processed in one go
 int main(int argc, const char **argv) {
@@ -81,15 +81,12 @@ int main(int argc, const char **argv) {
 
     std::list<Job> jobs;
 
-    // create first job
-    //Job *job = &jobs.emplace_back();
-
     fs::path outDir;
 
     std::string name;
     bool gerber = false;
     bool bom = false;
-    bool jlcpcb = false;
+    Manufacturer manufacturer = Manufacturer::GENERIC;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "-n") {
@@ -100,26 +97,26 @@ int main(int argc, const char **argv) {
             // zip gerber
             gerber = true;
         } else if (arg == "-b") {
-            // create bom
+            // create generic bom (includes voltage)
             bom = true;
         } else if (arg == "-j") {
-            // bom and placement file for JLCPCB
-            jlcpcb = true;
+            // JLCPCB
+            manufacturer = Manufacturer::JLCPCB;
         } else {
-            if (gerber || bom || jlcpcb) {
-                // add job
+            if (gerber || bom) {
+                // assume path to .kicad_pcb file: add job
                 fs::path pcbPath = arg;
                 if (name.empty())
                     name = pcbPath.stem().string();
 
-                jobs.emplace_back(name, gerber, bom, jlcpcb, pcbPath);
+                jobs.emplace_back(name, gerber, bom, manufacturer, pcbPath);
 
                 // clear
                 name.clear();
                 gerber = false;
                 bom = false;
-                jlcpcb = false;
             } else {
+                // set output directory
                 outDir = arg;
             }
         }
@@ -127,7 +124,8 @@ int main(int argc, const char **argv) {
 
     bool error = false;
     for (auto &job : jobs) {
-        std::cout << "*** " << job.name << " ***" << std::endl;
+        const char *manufacturers[] = {"Generic", "JLCPCB"};
+        std::cout << "*** " << job.name << " for " << manufacturers[int(job.manufacturer)] << " ***" << std::endl;
 
         // read pcb (.kicad_pcb) file
         std::ifstream s(job.pcbPath.string());
@@ -145,59 +143,153 @@ int main(int argc, const char **argv) {
 
         // zip gerber directory
         if (job.gerber) {
-            // find gerber directory
+
+            // get layers
+            std::set<std::string> layers;
+            {
+                auto layerContainer = file.find("layers");
+                if (layerContainer) {
+                    for (auto layer : *layerContainer) {
+                        layers.insert(layer->getString(0));
+                    }
+                }
+            }
+
+            // get gerber directory from pcb file (configured in the plot dialog)
             auto setup = file.find("setup");
             if (setup != nullptr) {
                 auto plotParams = setup->find("pcbplotparams");
-                auto gerberDir = fs::weakly_canonical(job.pcbPath.parent_path() / plotParams->findString("outputdirectory"));
+                if (plotParams != nullptr) {
+                    // get gerber directory
+                    auto gerberDir = fs::weakly_canonical(job.pcbPath.parent_path() / plotParams->findString("outputdirectory"));
+                    if (fs::is_directory(gerberDir)) {
+                        // get selected layers
+                        auto selection = plotParams->findString("layerselection");
+                        std::string selectedLayers;
+                        uint32_t flags[2] = {};
+                        int index = 0;
+                        int length = selection.size();
+                        for (int i = 2; i < length; ++i) {
+                            char ch = selection[i];
 
-                if (fs::is_directory(gerberDir)) {
-                    std::cout << "Zip gerber" << std::endl;
-                    auto zipPath = outDir / (job.name + ".zip");
+                            // check for next filed
+                            if (ch == '_') {
+                                ++index;
+                                if (index == 2)
+                                    break;
+                            }
 
-                    // create new zip
-                    ZipArchive zip(zipPath.string());
-                    if (zip.open(ZipArchive::New)) {
-                        // add files
-                        fs::directory_iterator end;
-                        for (fs::directory_iterator it(gerberDir); it != end; ++it) {
-                            if (it->is_regular_file()) {
-                                // read file
-                                fs::path path = it->path();
+                            int nibble = ch <= '9' ? ch - '0' : (ch - 'a' + 10);
+                            flags[index] = (flags[index] << 4) | nibble;
+                        }
 
-                                // check last write time
-                                if (fs::last_write_time(path) < pcbTime) {
-                                    std::cout << "Error: File is not up-to-date: " << path.string() << std::endl;
-                                    error = true;
-                                }
-
-                                if (!zip.addFile(path.filename().string(), path.string())) {
-                                    std::cout << "Error: Could add file to zip" << std::endl;
-                                    error = true;
+                        // copper layers
+                        if ((flags[1] & 1) != 0 && layers.contains("F.Cu"))
+                            selectedLayers += "F.Cu,";
+                        for (int i = 1; i < 31; ++i) {
+                            if ((flags[1] >> i) & 1) {
+                                std::string layer = "In" + std::to_string(i) + ".Cu";
+                                if (layers.contains(layer)) {
+                                    selectedLayers += layer;
+                                    selectedLayers += ',';
                                 }
                             }
                         }
-                        zip.close();
+                        if ((flags[1] & 0x80000000) && layers.contains("B.Cu"))
+                            selectedLayers += "B.Cu,";
+
+                        // other layers
+                        static const char *layerNames[] = {
+                            "F.Adhesive", "B.Adhesive", "F.Paste", "B.Paste",
+                            "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask",
+                            "User.Drawings", "User.Comments", "User.Eco1", "User.Eco2",
+                            "Edge.Cuts", "Margin", "F.Courtyard", "B.Courtyard"
+                            "F.Fab, B.Fab", "User.1", "User.2",
+                            "User.3", "User.4", "User.5", "User.6",
+                            "User.7", "User.8", "User.9"
+                        };
+                        for (int i = 0; i < 27; ++i) {
+                            if ((flags[0] >> i) & 1) {
+                                    if (layers.contains(layerNames[i])) {
+                                        selectedLayers += layerNames[i];
+                                        selectedLayers += ',';
+                                    }
+                                }
+                        }
+                        if (!selectedLayers.empty())
+                            selectedLayers.resize(selectedLayers.size() - 1);
+
+                        // export gerber
+                        {
+                            std::cout << "Export gerber" << std::endl;
+                            std::string command = "kicad-cli pcb export gerbers -l " + selectedLayers + " --subtract-soldermask --output " + gerberDir.string() + ' ' + job.pcbPath.string();
+                            int result = std::system(command.c_str());
+                        }
+
+                        // export drill
+                        {
+                            std::cout << "Export drill" << std::endl;
+                            std::string command = "kicad-cli pcb export drill --excellon-separate-th";
+                            if (job.manufacturer == Manufacturer::JLCPCB)
+                                command += " --excellon-oval-format";
+                            command += " --generate-map --map-format gerberx2 --output " + gerberDir.string() + ' ' + job.pcbPath.string();
+                            int result = std::system(command.c_str());
+                        }
+
+                        // zip gerber
+                        std::cout << "Zip gerber" << std::endl;
+                        auto zipPath = outDir / (job.name + ".zip");
+
+                        // create new zip
+                        ZipArchive zip(zipPath.string());
+                        if (zip.open(ZipArchive::New)) {
+                            // add files
+                            fs::directory_iterator end;
+                            for (fs::directory_iterator it(gerberDir); it != end; ++it) {
+                                if (it->is_regular_file()) {
+                                    // read file
+                                    fs::path path = it->path();
+
+                                    // check last write time
+                                    if (fs::last_write_time(path) < pcbTime) {
+                                        std::cout << "Error: File is not up-to-date: " << path.string() << std::endl;
+                                        error = true;
+                                    }
+
+                                    if (!zip.addFile(path.filename().string(), path.string())) {
+                                        std::cout << "Error: Could add file to zip" << std::endl;
+                                        error = true;
+                                    }
+                                }
+                            }
+                            zip.close();
+                        } else {
+                            std::cout << "Error: Could not write zip file: " << zipPath.string() << std::endl;
+                            error = true;
+                        }
                     } else {
-                        std::cout << "Error: Could not write zip file: " << zipPath.string() << std::endl;
+                        std::cout << "Error: Gerber directory not found: " << gerberDir.string() << std::endl;
                         error = true;
                     }
                 } else {
-                    std::cout << "Error: Gerber directory not found: " << gerberDir.string() << std::endl;
+                    std::cout << "Error: Gerber directory configuration not found" << std::endl;
                     error = true;
                 }
+            } else {
+                std::cout << "Error: Gerber directory configuration not found" << std::endl;
+                error = true;
             }
         }
 
-        if (job.bom) {
-            // open BOM file
+        if (job.bom && manufacturer == Manufacturer::GENERIC) {
+            // open generic BOM file
             fs::path bomPath = outDir / (job.name + ".csv");
             std::ofstream bom(bomPath);
             if (bom.is_open()) {
                 std::map<BomKey, BomValue> bomMap;
 
-                //bom << "Count,Type,Value,Voltage,Footprint,SMD Pads,THT Pads,Manufacturer,Mfr. PN,Description" << std::endl;
-                bom << "Count,Reference,Value,Voltage,Footprint,SMD Pads,THT Pads,Manufacturer,Mfr. PN,Description" << std::endl;
+                //bom << "Count,Type,Value,Voltage,Footprint,SMD Pads,THT Pads,Manufacturer,MPN,Description" << std::endl;
+                bom << "Count,Reference,Value,Voltage,Footprint,SMD Pads,THT Pads,Manufacturer,MPN,Description" << std::endl;
 
                 for (auto element1 : file.elements) {
                     auto container1 = dynamic_cast<kicad::Container *>(element1);
@@ -222,7 +314,7 @@ int main(int argc, const char **argv) {
                             //int padCount = 0;
                             std::set<std::string> padNames; // to detect duplicates
                             std::string manufacturer;
-                            std::string mfrPn;
+                            std::string mpn;
                             std::string description;
                             bool doNotPopulate = false;
                             bool excludeFromBom = false;
@@ -244,8 +336,9 @@ int main(int argc, const char **argv) {
                                             voltage = lround(std::stod(propertyValue) * 1000.0);
                                         } else if (propertyName == "Manufacturer") {
                                             manufacturer = propertyValue;
-                                        } else if (propertyName == "Mfr. PN") {
-                                            mfrPn = propertyValue;
+                                        } else if (propertyName == "MPN") {
+                                            // manufacturer part number
+                                            mpn = propertyValue;
                                         } else if (propertyName == "Description") {
                                             description = propertyValue;
                                         }
@@ -264,7 +357,7 @@ int main(int argc, const char **argv) {
                             }
 
                             if (!excludeFromBom) {
-                                auto &v = bomMap[{getType(reference), value, voltage, footprintName, manufacturer, mfrPn}];
+                                auto &v = bomMap[{getType(reference), value, voltage, footprintName, manufacturer, mpn}];
                                 v.references.push_back(reference);
                                 int padCount = padNames.size();
                                 v.padCount = std::max(v.padCount, padCount);
@@ -306,7 +399,7 @@ int main(int argc, const char **argv) {
 
                     // manufactuer, part number, description
                     bom << "\"" << p.first.manufacturer << "\","
-                        << p.first.mfrPn << ","
+                        << p.first.mpn << ","
                         "\"" << p.second.description << "\"" << std::endl;
                 }
                 bom.close();
@@ -316,8 +409,8 @@ int main(int argc, const char **argv) {
             }
         }
 
-        if (job.jlcpcb) {
-            // open BOM file
+        if (job.bom && manufacturer == Manufacturer::JLCPCB) {
+            // open BOM file for JLCPCB
             fs::path bomPath = outDir / (job.name + "-BOM.csv");
             std::ofstream bom(bomPath);
 

@@ -1,5 +1,6 @@
 #include "kicad.hpp"
 #include <fstream>
+#include <sstream>
 
 
 namespace kicad {
@@ -144,12 +145,21 @@ void readContainer(Tokenizer &t, Container &container) {
 } // namespace
 
 
-std::string toString(std::string_view value) {
+/*std::string toString(std::string_view value) {
     std::string str;
     str += '"';
     str += value;
     str += '"';
     return str;
+}*/
+
+// Element
+
+Element::~Element() {
+}
+
+Element::Action Element::sweep(){
+    return this->action;
 }
 
 
@@ -166,18 +176,27 @@ void Value::write(std::ostream &s, int indent) {
     s << this->value;
 }
 
+std::string Value::getString(std::string_view defaultValue) {
+    // remove quotes
+    int size = this->value.size();
+    if (size >= 2 && this->value.front() == '"' && this->value.back() == '"')
+        return this->value.substr(1, size - 2);
+
+    return this->value;
+}
+
+void Value::setString(std::string_view value) {
+    this->value = '"';
+    this->value += value;
+    this->value += '"';
+}
+
+
 
 // Container
 
 Container::~Container() {
     clear();
-}
-
-void Container::clear() {
-    for (auto element : this->elements) {
-        delete element;
-    }
-    this->elements.clear();
 }
 
 int Container::count() {
@@ -188,6 +207,52 @@ int Container::count() {
     return c;
 }
 
+Element::Action Container::sweep() {
+    auto dst = this->elements.begin();
+    bool keep = false;
+    for (auto src = dst; src != this->elements.end(); ++src) {
+        auto action = (*src)->sweep();
+        if (action != Action::KEEP && (*src)->action == Action::DELETE) {
+            delete *src;
+        } else {
+            *dst = *src;
+            ++dst;
+            keep |= action == Action::KEEP;
+        }
+    }
+    this->elements.erase(dst, this->elements.end());
+    return keep ? Action::KEEP : this->action;
+}
+
+void Container::write(std::ostream &s, int indent) {
+    bool multiLine = count() > 16;
+
+    s << '(' << this->id;
+
+    bool multiline2 = false;
+    for (auto element : this->elements) {
+        multiline2 |= dynamic_cast<Container *>(element) != nullptr;
+
+        if (multiLine && multiline2) {
+            newLine(s, indent + 1);
+        } else {
+            s << ' ';
+        }
+
+        element->write(s, indent + 1);
+    }
+    if (multiLine && multiline2) {
+        newLine(s, indent);
+    }
+    s << ')';
+}
+
+void Container::clear() {
+    for (auto element : this->elements) {
+        delete element;
+    }
+    this->elements.clear();
+}
 
 Container *Container::add(std::string_view id) {
     auto container = new Container(id);
@@ -211,24 +276,26 @@ Container &Container::setString(int index, std::string_view value) {
     if (index >= this->elements.size())
         this->elements.resize(index + 1);
     auto v = new Value();
-    v->value += '"';
+    v->value = '"';
     v->value += value;
     v->value += '"';
     this->elements[index] = v;
     return *this;
 }
 
-Container &Container::setInt(int index, int value) {
+/*Container &Container::setInt(int index, int value) {
     if (index >= this->elements.size())
         this->elements.resize(index + 1);
     this->elements[index] = new Value(std::to_string(value));
     return *this;
-}
+}*/
 
-Container &Container::setFloat(int index, double value) {
+Container &Container::setNumber(int index, double value) {
     if (index >= this->elements.size())
         this->elements.resize(index + 1);
-    this->elements[index] = new Value(std::to_string(value));
+    std::stringstream ss;
+    ss << value;
+    this->elements[index] = new Value(ss.str());
     return *this;
 }
 
@@ -244,13 +311,13 @@ std::string Container::getString(int index, std::string_view defaultValue) {
     auto value = getValue(index);
     if (value == nullptr)
         return std::string(defaultValue);
-
-    // remove quotes
+    return value->getString();
+/*    // remove quotes
     int size = value->value.size();
     if (size >= 2 && value->value.front() == '"' && value->value.back() == '"')
-        return std::string(value->value.substr(1, size - 2));
+        return value->value.substr(1, size - 2);
 
-    return value->value;
+    return value->value;*/
 }
 
 int Container::getInt(int index, int defaultValue) {
@@ -260,20 +327,20 @@ int Container::getInt(int index, int defaultValue) {
 
     // cast to int
     try {
-        return std::stoi(value->value);
+        return std::stoi(value->getString());
     } catch (std::exception &) {
         return defaultValue;
     }
 }
 
-double Container::getFloat(int index, double defaultValue) {
+double Container::getNumber(int index, double defaultValue) {
     auto value = getValue(index);
     if (value == nullptr)
         return defaultValue;
 
     // cast to double
     try {
-        return std::stod(value->value);
+        return std::stod(value->getString());
     } catch (std::exception &) {
         return defaultValue;
     }
@@ -310,10 +377,10 @@ std::string Container::findString(std::string_view id) {
     return {};
 }
 
-double Container::findFloat(std::string_view id) {
+double Container::findNumber(std::string_view id) {
     auto container = find(id);
     if (container != nullptr)
-        return container->getFloat(0);
+        return container->getNumber(0);
     return {};
 }
 
@@ -324,10 +391,10 @@ Container::Value2<std::string> Container::findString2(std::string_view id) {
     return {};
 }
 
-Container::Value2<double> Container::findFloat2(std::string_view id) {
+Container::Value2<double> Container::findNumber2(std::string_view id) {
     auto container = find(id);
     if (container != nullptr)
-        return {container->getFloat(0), container->getFloat(1)};
+        return {container->getNumber(0), container->getNumber(1)};
     return {};
 }
 
@@ -352,29 +419,6 @@ void Container::erase(std::string_view id) {
             ++it;
         }
     }
-}
-
-void Container::write(std::ostream &s, int indent) {
-    bool multiLine = count() > 16;
-
-    s << '(' << this->id;
-
-    bool multiline2 = false;
-    for (auto element : this->elements) {
-        multiline2 |= dynamic_cast<Container *>(element) != nullptr;
-
-        if (multiLine && multiline2) {
-            newLine(s, indent + 1);
-        } else {
-            s << ' ';
-        }
-
-        element->write(s, indent + 1);
-    }
-    if (multiLine && multiline2) {
-        newLine(s, indent);
-    }
-    s << ')';
 }
 
 void Container::newLine(std::ostream &s, int indent) {

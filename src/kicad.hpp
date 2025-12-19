@@ -12,17 +12,25 @@
 ///
 namespace kicad {
 
-std::string toString(std::string_view value);
+//std::string toString(std::string_view value);
 
 
 class Element {
 public:
+    enum class Action {
+        NONE,
+        KEEP,
+        DELETE,
+    };
 
-    virtual ~Element() {}
-
+    Element() = default;
+    Element(Element &&other) = default;
+    virtual ~Element();
     virtual int count() = 0;
-
+    virtual Action sweep();
     virtual void write(std::ostream &s, int indent) = 0;
+
+    Action action = Action::NONE;
 };
 
 
@@ -30,12 +38,16 @@ class Value : public Element {
 public:
     Value() = default;
     Value(std::string_view value) : value(value) {}
+    Value(Value &&other) = default;
 
-    virtual ~Value();
-
+    ~Value() override;
     int count() override;
-
     void write(std::ostream &s, int indent) override;
+
+    std::string getString(std::string_view defaultValue = {});
+
+    void setString(std::string_view value);
+
 
     std::string value;
 };
@@ -53,12 +65,17 @@ public:
     Container() = default;
     Container(std::string_view id) : id(id) {}
     Container(const Container &) = delete;
+    Container(Container &&other) = default;
 
     virtual ~Container();
+    int count() override;
+    Action sweep() override;
+    void write(std::ostream &s, int indent) override;
+
+
 
     void clear();
 
-    int count() override;
 
     /// @brief Add a new element
     /// @param element
@@ -129,8 +146,7 @@ public:
 
     Container &addTag(std::string_view value) {return setTag(this->elements.size(), value);}
     Container &addString(std::string_view value) {return setString(this->elements.size(), value);}
-    Container &addInt(int value) {return setInt(this->elements.size(), value);}
-    Container &addFloat(double value) {return setFloat(this->elements.size(), value);}
+    Container &addNumber(double value) {return setNumber(this->elements.size(), value);}
 
     /// @brief Set a tag at a given index
     /// @param index Index of the element to set
@@ -142,15 +158,10 @@ public:
     /// @param value String to set, gets quoted
     Container &setString(int index, std::string_view value);
 
-    /// @brief Set an integer at a given index
-    /// @param index Index of the element to set
-    /// @param value Integer value to set
-    Container &setInt(int index, int value);
-
-    /// @brief Set a floating point number at a given index
+    /// @brief Set a number at a given index
     /// @param index Index of the element to set
     /// @param value Floating point value to set
-    Container &setFloat(int index, double value);
+    Container &setNumber(int index, double value);
 
 
     /// @brief Get an element of type kicad::Value at a given index.
@@ -186,8 +197,8 @@ public:
     /// @brief Get a number at given index, returning defaultValue if index is out of bounds or element is not of type Value.
     /// @param index Index of the element to get
     /// @param defaultValue Value to return if index is out of bounds or element is not of type Value
-    /// @return Floating point value at given index
-    double getFloat(int index, double defaultValue = 0.0);
+    /// @return Number value at given index
+    double getNumber(int index, double defaultValue = 0.0);
 
 
     /// @brief Check if the container contains a tag.
@@ -208,7 +219,7 @@ public:
     /// @brief Find element container with given id and return its first value as number.
     /// @param id id of sub-container to find
     /// @return value or zero if not found
-    double findFloat(std::string_view id);
+    double findNumber(std::string_view id);
 
     /// @brief Find element container with given id and return its first and second value as string.
     /// @param id id of sub-container to find
@@ -218,7 +229,7 @@ public:
     /// @brief Find element container with given id and return its first and second value as number.
     /// @param id id of sub-container to find
     /// @return values or zeros if not found
-    Value2<double> findFloat2(std::string_view id);
+    Value2<double> findNumber2(std::string_view id);
 
     /// @brief Erase element.
     /// @param element Element to erase
@@ -229,8 +240,51 @@ public:
     void erase(std::string_view id);
 
 
-    void write(std::ostream &s, int indent) override;
     static void newLine(std::ostream &s, int indent);
+
+
+
+    class Iterator {
+    public:
+        Iterator(std::vector<Element *>::iterator it, std::vector<Element *>::iterator end)
+            : it(it), end(end)
+        {
+            nextContainer();
+        }
+
+        Iterator(std::vector<Element *>::iterator end)
+            : it(end), end(end)
+        {
+        }
+
+        Iterator & operator ++() {
+            ++this->it;
+            nextContainer();
+            return *this;
+        }
+
+        Container * operator *() {
+            return static_cast<Container *>(*this->it);
+        }
+
+        bool operator == (const Iterator &other) const {
+            return this->it == other.it;
+        }
+
+    protected:
+        void nextContainer() {
+            while (this->it != this->end && dynamic_cast<Container *>(*this->it) == nullptr) {
+                ++this->it;
+            }
+        }
+
+        std::vector<Element *>::iterator it;
+        std::vector<Element *>::iterator end;
+    };
+
+    Iterator begin() {return {this->elements.begin(), this->elements.end()};}
+    Iterator end() {return this->elements.end();}
+
 
 
     std::string id;
