@@ -21,7 +21,7 @@ with C++ for desktop option and/or change cppstd to 20.
 
 ## Debug Profile
 
-Create debug profile by copying the default profile and set
+Create debug profile ~/.conan2/profiles/debug by copying the default profile and set
 
 ```
 build_type=Debug

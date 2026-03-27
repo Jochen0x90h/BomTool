@@ -1,4 +1,5 @@
 #include "kicad.hpp"
+#include <nlohmann/json.hpp>
 #include <libzippp/libzippp.h> // https://github.com/ctabin/libzippp
 #include <iostream>
 #include <fstream>
@@ -7,8 +8,30 @@
 
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 using namespace libzippp;
 
+
+// substitute variables in a string, e.g. "${VERSION}" with "1.0"
+void substituteVariables(std::string &str, const std::map<std::string, std::string> &variables) {
+    size_t pos = 0;
+    while (true) {
+        pos = str.find("${", pos);
+        if (pos == std::string::npos)
+            break;
+        size_t endPos = str.find('}', pos);
+        if (endPos == std::string::npos)
+            break;
+        std::string varName = str.substr(pos + 2, endPos - pos - 2);
+        auto it = variables.find(varName);
+        if (it != variables.end()) {
+            str.replace(pos, endPos - pos + 1, it->second);
+            pos += it->second.length();
+        } else {
+            pos = endPos + 1;
+        }
+    }
+}
 
 // extract type of a component, e.g. "R" from "R1"
 std::string getType(std::string_view reference) {
@@ -79,14 +102,13 @@ int main(int argc, const char **argv) {
     if (argc < 2)
         return 1;
 
-    std::list<Job> jobs;
-
-    fs::path outDir;
-
+    // parse arguments
     std::string name;
     bool gerber = false;
     bool bom = false;
     Manufacturer manufacturer = Manufacturer::GENERIC;
+    std::list<Job> jobs;
+    fs::path outDir;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "-n") {
@@ -127,6 +149,26 @@ int main(int argc, const char **argv) {
         const char *manufacturers[] = {"Generic", "JLCPCB"};
         std::cout << "*** " << job.name << " for " << manufacturers[int(job.manufacturer)] << " ***" << std::endl;
 
+        // try to read project (.kicad_pro) file
+        std::map<std::string, std::string> variables;
+        {
+            fs::path projectPath = job.pcbPath;
+            projectPath.replace_extension(".kicad_pro");
+            std::ifstream is(projectPath.string());
+            if (is.is_open()) {
+                try {
+                    json j = json::parse(is);
+                    json vars = j.at("text_variables");
+                    for (auto it = vars.begin(); it != vars.end(); ++it) {
+                        std::string key = it.key();
+                        std::string value = it.value();
+                        variables[key] = value;
+                    }
+                } catch (std::exception &e) {
+                }
+            }
+        }
+
         // read pcb (.kicad_pcb) file
         std::ifstream s(job.pcbPath.string());
         if (!s) {
@@ -140,6 +182,20 @@ int main(int argc, const char **argv) {
 
         // get last write time of pcb
         auto pcbTime = fs::last_write_time(job.pcbPath);
+
+        // get version suffix for file names
+        std::string version;
+        {
+            auto titleBlockContainer = file.find("title_block");
+            if (titleBlockContainer) {
+                auto revContainer = titleBlockContainer->find("rev");
+                if (revContainer) {
+                    version = '-';
+                    version += revContainer->getString(0);
+                    substituteVariables(version, variables);
+                }
+            }
+        }
 
         // zip gerber directory
         if (job.gerber) {
@@ -166,7 +222,7 @@ int main(int argc, const char **argv) {
                         // get selected layers
                         auto selection = plotParams->findString("layerselection");
                         std::string selectedLayers;
-                        uint32_t flags[2] = {};
+                        uint32_t flags[4] = {};
                         int index = 0;
                         int length = selection.size();
                         for (int i = 2; i < length; ++i) {
@@ -175,7 +231,7 @@ int main(int argc, const char **argv) {
                             // check for next filed
                             if (ch == '_') {
                                 ++index;
-                                if (index == 2)
+                                if (index == 4)
                                     break;
                             }
 
@@ -183,47 +239,115 @@ int main(int argc, const char **argv) {
                             flags[index] = (flags[index] << 4) | nibble;
                         }
 
-                        // copper layers
-                        if ((flags[1] & 1) != 0 && layers.contains("F.Cu"))
-                            selectedLayers += "F.Cu,";
-                        for (int i = 1; i < 31; ++i) {
-                            if ((flags[1] >> i) & 1) {
-                                std::string layer = "In" + std::to_string(i) + ".Cu";
-                                if (layers.contains(layer)) {
-                                    selectedLayers += layer;
-                                    selectedLayers += ',';
-                                }
-                            }
-                        }
-                        if ((flags[1] & 0x80000000) && layers.contains("B.Cu"))
-                            selectedLayers += "B.Cu,";
+                        if (index <= 2) {
+                            // old format (KiCad 8)
+                            static const char *layerNames[] = {
+                                "F.Adhesive", "B.Adhesive", "F.Paste", "B.Paste",
+                                "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask",
+                                "User.Drawings", "User.Comments", "User.Eco1", "User.Eco2",
+                                "Edge.Cuts", "Margin", "F.Courtyard", "B.Courtyard",
+                                "F.Fab", "B.Fab", "User.1", "User.2",
+                                "User.3", "User.4", "User.5", "User.6",
+                                "User.7", "User.8", "User.9"
+                            };
 
-                        // other layers
-                        static const char *layerNames[] = {
-                            "F.Adhesive", "B.Adhesive", "F.Paste", "B.Paste",
-                            "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask",
-                            "User.Drawings", "User.Comments", "User.Eco1", "User.Eco2",
-                            "Edge.Cuts", "Margin", "F.Courtyard", "B.Courtyard"
-                            "F.Fab, B.Fab", "User.1", "User.2",
-                            "User.3", "User.4", "User.5", "User.6",
-                            "User.7", "User.8", "User.9"
-                        };
-                        for (int i = 0; i < 27; ++i) {
-                            if ((flags[0] >> i) & 1) {
-                                    if (layers.contains(layerNames[i])) {
-                                        selectedLayers += layerNames[i];
+                            // copper layers
+                            if ((flags[1] & 1) != 0 && layers.contains("F.Cu"))
+                                selectedLayers += "F.Cu,";
+                            for (int i = 1; i < 31; ++i) {
+                                if ((flags[1] >> i) & 1) {
+                                    std::string layer = "In" + std::to_string(i) + ".Cu";
+                                    if (layers.contains(layer)) {
+                                        selectedLayers += layer;
                                         selectedLayers += ',';
                                     }
                                 }
+                            }
+                            if ((flags[1] & 0x80000000) && layers.contains("B.Cu"))
+                                selectedLayers += "B.Cu,";
+
+                            // other layers
+                            for (int i = 0; i < 27; ++i) {
+                                if ((flags[0] >> i) & 1) {
+                                        //if (layers.contains(layerNames[i])) {
+                                            selectedLayers += layerNames[i];
+                                            selectedLayers += ',';
+                                        //}
+                                    }
+                            }
+                        } else {
+                            // new format (KiCad 9)
+                            static const char *layerNames[] = {
+                                "F.Mask",
+                                "B.Mask",
+                                "F.Silkscreen",
+                                "B.Silkscreen",
+                                "F.Adhesive",
+                                "B.Adhesive",
+                                "F.Paste",
+                                "B.Paste",
+                                "User.Drawings",
+                                "User.Comments",
+                                "User.Eco1",
+                                "User.Eco2",
+                                "Edge.Cuts",
+                                "Margin",
+                                "F.Courtyard",
+                                "B.Courtyard",
+                                "F.Fab",
+                                "B.Fab",
+                                "",
+                                "User.1",
+                                "User.2",
+                                "User.3",
+                                "User.4",
+                                "User.5",
+                                "User.6",
+                                "User.7",
+                                "User.8",
+                                "User.9"
+                            };
+
+                            // copper layers (... x In3.Cu x In2.Cu x In1.Cu x B.Cu x F.Cu)
+                            if ((flags[3] & 1) != 0 && layers.contains("F.Cu"))
+                                selectedLayers += "F.Cu,";
+                            for (int i = 2; i < 32; ++i) {
+                                if ((flags[3 - i / 16] >> (i * 2 & 31)) & 1) {
+                                    std::string layer = "In" + std::to_string(i - 1) + ".Cu";
+                                    if (layers.contains(layer)) {
+                                        selectedLayers += layer;
+                                        selectedLayers += ',';
+                                    }
+                                }
+                            }
+                            if ((flags[3] & 4) && layers.contains("B.Cu"))
+                                selectedLayers += "B.Cu,";
+
+                            // other layers
+                            for (int i = 0; i < 28; ++i) {
+                                if ((flags[3 - i / 16] >> (i * 2 & 31)) & 2) {
+                                    selectedLayers += layerNames[i];
+                                    selectedLayers += ',';
+                                        //std::cout << i << std::endl;
+                                    //}
+                                }
+                            }
                         }
+
+                        // remove trailing ','
                         if (!selectedLayers.empty())
                             selectedLayers.resize(selectedLayers.size() - 1);
 
                         // export gerber
                         {
                             std::cout << "Export gerber" << std::endl;
+                            // add --check-zones
                             std::string command = "kicad-cli pcb export gerbers -l " + selectedLayers + " --subtract-soldermask --output " + gerberDir.string() + ' ' + job.pcbPath.string();
                             int result = std::system(command.c_str());
+                            if (result != 0) {
+                                error = true;
+                                std::cerr << "Error: Gerber export, kicad-cli returned result " << result << std::endl;
+                            }
                         }
 
                         // export drill
@@ -234,11 +358,15 @@ int main(int argc, const char **argv) {
                                 command += " --excellon-oval-format";
                             command += " --generate-map --map-format gerberx2 --output " + gerberDir.string() + ' ' + job.pcbPath.string();
                             int result = std::system(command.c_str());
+                            if (result != 0) {
+                                error = true;
+                                std::cerr << "Error: Drill export, kicad-cli returned result " << result << std::endl;
+                            }
                         }
 
                         // zip gerber
                         std::cout << "Zip gerber" << std::endl;
-                        auto zipPath = outDir / (job.name + ".zip");
+                        auto zipPath = outDir / (job.name + version + ".zip");
 
                         // create new zip
                         ZipArchive zip(zipPath.string());
@@ -252,38 +380,38 @@ int main(int argc, const char **argv) {
 
                                     // check last write time
                                     if (fs::last_write_time(path) < pcbTime) {
-                                        std::cout << "Error: File is not up-to-date: " << path.string() << std::endl;
+                                        std::cerr << "Error: File is not up-to-date: " << path.string() << std::endl;
                                         error = true;
                                     }
 
                                     if (!zip.addFile(path.filename().string(), path.string())) {
-                                        std::cout << "Error: Could add file to zip" << std::endl;
+                                        std::cerr << "Error: Could add file to zip" << std::endl;
                                         error = true;
                                     }
                                 }
                             }
                             zip.close();
                         } else {
-                            std::cout << "Error: Could not write zip file: " << zipPath.string() << std::endl;
+                            std::cerr << "Error: Could not write zip file: " << zipPath.string() << std::endl;
                             error = true;
                         }
                     } else {
-                        std::cout << "Error: Gerber directory not found: " << gerberDir.string() << std::endl;
+                        std::cerr << "Error: Gerber directory not found: " << gerberDir.string() << std::endl;
                         error = true;
                     }
                 } else {
-                    std::cout << "Error: Gerber directory configuration not found" << std::endl;
+                    std::cerr << "Error: Gerber directory configuration not found" << std::endl;
                     error = true;
                 }
             } else {
-                std::cout << "Error: Gerber directory configuration not found" << std::endl;
+                std::cerr << "Error: Gerber directory configuration not found" << std::endl;
                 error = true;
             }
         }
 
         if (job.bom && manufacturer == Manufacturer::GENERIC) {
             // open generic BOM file
-            fs::path bomPath = outDir / (job.name + ".csv");
+            fs::path bomPath = outDir / (job.name + version + ".csv");
             std::ofstream bom(bomPath);
             if (bom.is_open()) {
                 std::map<BomKey, BomValue> bomMap;
@@ -411,11 +539,11 @@ int main(int argc, const char **argv) {
 
         if (job.bom && manufacturer == Manufacturer::JLCPCB) {
             // open BOM file for JLCPCB
-            fs::path bomPath = outDir / (job.name + "-BOM.csv");
+            fs::path bomPath = outDir / (job.name + version + "-BOM.csv");
             std::ofstream bom(bomPath);
 
             // open CPL file
-            fs::path cplPath = outDir / (job.name + "-CPL.csv");
+            fs::path cplPath = outDir / (job.name + version + "-CPL.csv");
             std::ofstream cpl(cplPath);
 
             if (bom.is_open() && cpl.is_open()) {
@@ -443,6 +571,9 @@ int main(int argc, const char **argv) {
                             if (pos != std::string::npos)
                                 footprintName.erase(0, pos + 1);
 
+                            // get layer
+                            auto layer = footprint->findString("layer");
+
                             // get footprint properties
                             std::string x, y, rot;
                             std::string reference;
@@ -464,15 +595,11 @@ int main(int argc, const char **argv) {
                                         if (propertyName == "Reference") {
                                             // reference (designator), e.g. "R1"
                                             reference = propertyValue;
-                                            if (usedReferences.contains(reference)) {
-                                                std::cout << "Error: Duplicate reference " << reference << std::endl;
-                                                error = true;
-                                            }
-                                            usedReferences.insert(reference);
                                         } else if (propertyName == "Value") {
                                             // value, e.g. "100k"
                                             value = propertyValue;
                                         } else if (propertyName == "LCSC PN") {
+                                            // LCSC part number
                                             lcscPn = propertyValue;
                                         }
                                     }
@@ -484,12 +611,21 @@ int main(int argc, const char **argv) {
                             }
 
                             if (!doNotPopulate && !excludeFromBom) {
+                                // check for duplicate reference
+                                if (usedReferences.contains(reference)) {
+                                    std::cout << "Error: Duplicate reference " << reference << std::endl;
+                                    error = true;
+                                }
+                                usedReferences.insert(reference);
+
                                 //std::cout << "add " << footprint << " reference " << reference << " value " << value << " at " << x << ' ' << y << ' ' << rot << std::endl;
 
                                 bomMap[{getType(reference), value, footprintName, lcscPn}].push_back(reference);
 
+                                std::string side = layer == "F.Cu" ? "top" : "bottom";
+
                                 // write line to CPL file
-                                cpl << reference << ',' << x << ",-" << y << ',' << rot << "," << "top" << std::endl;
+                                cpl << reference << ',' << x << ",-" << y << ',' << rot << "," << side << std::endl;
                             } else {
                                 //std::cout << "reject " << footprint << " reference " << reference << " value " << value << std::endl;
                             }

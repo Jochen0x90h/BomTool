@@ -14,6 +14,7 @@ class Project(ConanFile):
     exports_sources = "conanfile.py", "CMakeLists.txt", "src/*"
     requires = [
         "libzippp/7.1-1.10.1",
+        "nlohmann_json/3.12.0"
     ]
 
     keep_imports = True

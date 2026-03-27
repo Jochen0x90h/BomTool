@@ -5,6 +5,7 @@ add_executable(${PROJECT_NAME}
 )
 target_link_libraries(${PROJECT_NAME}
     libzippp::libzippp
+    nlohmann_json::nlohmann_json
 )
 
 # install
