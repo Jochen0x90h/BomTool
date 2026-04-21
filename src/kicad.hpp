@@ -74,7 +74,7 @@ public:
 
 
 
-    void clear();
+    Container &clear();
 
 
     /// @brief Add a new element
@@ -134,6 +134,7 @@ public:
         return container;
     }
 */
+// add
     /// @brief Add a new container
     /// @param id Id of container
     /// @return The new container
@@ -148,6 +149,7 @@ public:
     Container &addString(std::string_view value) {return setString(this->elements.size(), value);}
     Container &addNumber(double value) {return setNumber(this->elements.size(), value);}
 
+// set
     /// @brief Set a tag at a given index
     /// @param index Index of the element to set
     /// @param value Tag to set
@@ -163,7 +165,7 @@ public:
     /// @param value Floating point value to set
     Container &setNumber(int index, double value);
 
-
+// get
     /// @brief Get an element of type kicad::Value at a given index.
     /// @param index Index
     /// @return Element if the element exists and is of type kicad::Value, otherwise nullptr
@@ -200,7 +202,7 @@ public:
     /// @return Number value at given index
     double getNumber(int index, double defaultValue = 0.0);
 
-
+// find
     /// @brief Check if the container contains a tag.
     /// @param tag Tag to find
     /// @return true if the tag is an element of the container
@@ -208,8 +210,13 @@ public:
 
     /// @brief Find element container with given id.
     /// @param id id of sub-container to find
-    /// @return container or nullptr if not found or not of type Container
+    /// @return Container or nullptr if not found or not of type Container
     Container *find(std::string_view id);
+
+    /// @brief Find or add element container with given id.
+    /// @param id id of sub-container to find
+    /// @return Found or new container
+    Container *findOrAdd(std::string_view id);
 
     /// @brief Find element container with given id and return its first value as string.
     /// @param id id of sub-container to find
@@ -231,6 +238,32 @@ public:
     /// @return values or zeros if not found
     Value2<double> findNumber2(std::string_view id);
 
+// helpers
+
+    /// @brief Insert a new element if it does not exist yet.
+    /// @tparam F Function type
+    /// @param id id of sub-container to find
+    /// @param function Function to be called on the new element
+    template <typename F>
+    void insert(std::string_view id, const F& function) {
+        auto c = find(id);
+        if (!c) {
+            c = add(id);
+            function(*c);
+        }
+    }
+
+    /// @brief Update an element and create it if it does not exist yet.
+    /// @tparam F Function type
+    /// @param id id of sub-container to find
+    /// @param function Function to be called on the new element
+    template <typename F>
+    void update(std::string_view id, const F& function) {
+        auto c = findOrAdd(id);
+        function(*c);
+    }
+
+// erase
     /// @brief Erase element.
     /// @param element Element to erase
     void erase(Element *element);

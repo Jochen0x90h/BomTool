@@ -247,11 +247,12 @@ void Container::write(std::ostream &s, int indent) {
     s << ')';
 }
 
-void Container::clear() {
+Container &Container::clear() {
     for (auto element : this->elements) {
         delete element;
     }
     this->elements.clear();
+    return *this;
 }
 
 Container *Container::add(std::string_view id) {
@@ -368,6 +369,20 @@ Container *Container::find(std::string_view id) {
         }
     }
     return nullptr;
+}
+
+Container *Container::findOrAdd(std::string_view id) {
+    for (auto element : this->elements) {
+        auto container = dynamic_cast<Container *>(element);
+        if (container != nullptr) {
+            if (container->id == id) {
+                return container;
+            }
+        }
+    }
+    auto container = new Container(id);
+    this->elements.push_back(container);
+    return container;
 }
 
 std::string Container::findString(std::string_view id) {

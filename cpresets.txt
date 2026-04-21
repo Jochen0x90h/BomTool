@@ -1,0 +1,3 @@
+# profile generator [system]
+debug "Visual Studio 17 2022" Windows
+default "Visual Studio 17 2022" Windows

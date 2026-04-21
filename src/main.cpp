@@ -5,11 +5,33 @@
 #include <fstream>
 #include <filesystem>
 #include <set>
-
+#include <numbers>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 using namespace libzippp;
+using std::numbers::pi;
+
+
+/// @brief Simple vector class
+/// @tparam T Element type (e.g. double)
+template <typename T>
+struct Vector2 {
+    T x;
+    T y;
+};
+
+template <typename T1, typename T2>
+inline auto operator +(const Vector2<T1> &a, const Vector2<T2> &b) {
+    return Vector2<decltype(a.x + b.x)>(a.x + b.x, a.y + b.y);
+}
+
+template <typename T1, typename T2>
+inline auto operator -(const Vector2<T1> &a, const Vector2<T2> &b) {
+    return Vector2<decltype(a.x - b.x)>(a.x - b.x, a.y - b.y);
+}
+
+using double2 = Vector2<double>;
 
 
 // substitute variables in a string, e.g. "${VERSION}" with "1.0"
@@ -52,10 +74,20 @@ enum class Manufacturer {
 };
 
 struct Job {
+    // output file name (without extension)
     std::string name;
+
+    // export and zip gerber files using kicad-cli
     bool gerber;
+
+    // generate manufacturer specific BOM and placement file
     bool bom;
     Manufacturer manufacturer;
+
+    // export drill for OpenSCAD (used for 3D model generation)
+    bool drill;
+
+    // path to .kicad_pcb file
     fs::path pcbPath;
 };
 
@@ -106,6 +138,7 @@ int main(int argc, const char **argv) {
     std::string name;
     bool gerber = false;
     bool bom = false;
+    bool drill = false;
     Manufacturer manufacturer = Manufacturer::GENERIC;
     std::list<Job> jobs;
     fs::path outDir;
@@ -124,32 +157,38 @@ int main(int argc, const char **argv) {
         } else if (arg == "-j") {
             // JLCPCB
             manufacturer = Manufacturer::JLCPCB;
+        } else if (arg == "-d") {
+            // export drill
+            drill = true;
         } else {
-            if (gerber || bom) {
-                // assume path to .kicad_pcb file: add job
+            if (gerber || bom || drill) {
+                // argument is path to .kicad_pcb file: add job
                 fs::path pcbPath = arg;
                 if (name.empty())
                     name = pcbPath.stem().string();
 
-                jobs.emplace_back(name, gerber, bom, manufacturer, pcbPath);
+                jobs.emplace_back(name, gerber, bom, manufacturer, drill, pcbPath);
 
                 // clear
                 name.clear();
                 gerber = false;
                 bom = false;
+                drill = false;
             } else {
-                // set output directory
+                // argument is output directory
                 outDir = arg;
             }
         }
     }
+
+    std::cout << "Output directory: " << outDir.string() << std::endl;
 
     bool error = false;
     for (auto &job : jobs) {
         const char *manufacturers[] = {"Generic", "JLCPCB"};
         std::cout << "*** " << job.name << " for " << manufacturers[int(job.manufacturer)] << " ***" << std::endl;
 
-        // try to read project (.kicad_pro) file
+        // try to read project (.kicad_pro) file for variables
         std::map<std::string, std::string> variables;
         {
             fs::path projectPath = job.pcbPath;
@@ -667,6 +706,83 @@ int main(int argc, const char **argv) {
             } else {
                 std::cout << "Error: Could not create BOM/CPL file in " << outDir.string() << std::endl;
                 error = true;
+            }
+        }
+
+        if (job.drill) {
+            // open drill file for OpenSCAD export
+            fs::path drillPath = outDir / (job.name + ".scad");
+            std::ofstream drillFile(drillPath);
+
+            for (auto container1 : file) {
+                // check if it is a footprint
+                if (container1->id == "footprint") {
+                    auto footprint = container1;
+
+                    // get footprint name
+                    auto footprintName = footprint->getString(0);
+                    //std::cout << "Footprint: " << footprintName << std::endl;
+
+                    // get position and rotation of footprint
+                    double2 position = {0, 0};
+                    double rotation = 0;
+                    for (auto property : *footprint) {
+                        if (property->id == "at") {
+                            auto at = property;
+                            position.x = at->getNumber(0);
+                            position.y = at->getNumber(1);
+                            rotation = at->getNumber(2);
+                        }
+                    }
+
+                    // get drill holes
+                    bool first = true;
+                    for (auto property : *footprint) {
+                        if (property->id == "pad") {
+                            auto pad = property;
+
+                            std::string type = pad->getTag(1);
+                            if (type == "thru_hole" || type == "np_thru_hole") {
+                                // get pad name
+                                std::string padName = pad->getString(0);
+                                //std::cout << "  Pad: " << padName << std::endl;
+
+                                // get pad position
+                                auto at = pad->find("at");
+                                auto x = at->getNumber(0);
+                                auto y = at->getNumber(1);
+
+                                // get drill size
+                                auto drill = pad->find("drill");
+                                double w, h;
+                                if (drill->elements.size() == 1) {
+                                    w = h = drill->getNumber(0);
+                                } else {
+                                    w = drill->getNumber(1);
+                                    h = drill->getNumber(2);
+                                }
+
+                                // transform to global coordinates
+                                double r = rotation * pi / 180.0;
+                                double s = sin(r);
+                                double c = cos(r);
+                                double gX = position.x + c * x + s * y;
+                                double gY = position.y + c * y - s * x;
+
+                                if (first) {
+                                    first = false;
+                                    drillFile << "// " << footprintName << std::endl;
+                                }
+                                drillFile << "drill(" << gX << ", " << gY << ", " << w << ", " << h << ", " << rotation << ");";
+                                if (!padName.empty())
+                                    drillFile << " // " << padName;
+                                drillFile << std::endl;
+                            }
+                        }
+                    }
+                    if (!first)
+                        drillFile << std::endl;
+                }
             }
         }
     }

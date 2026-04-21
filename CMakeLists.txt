@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 
 # set project
-project(bom-tool)
+project(bom-tool CXX)
 
 # configure languages
-enable_language(CXX)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 
 # enable address sanitizer
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
